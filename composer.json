@@ -1,0 +1,61 @@
+{
+    "name": "prometa/laravel-lucene",
+    "description": "Pure-PHP Lucene query parser with a Laravel/Eloquent adapter that compiles Lucene queries into safe, parameterized SQL.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "laravel",
+        "eloquent",
+        "lucene",
+        "search",
+        "query-parser",
+        "full-text"
+    ],
+    "authors": [
+        {
+            "name": "Prometa",
+            "email": "florian.proksch@prometa.at"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/support": "^12.0 | ^13.0",
+        "illuminate/database": "^12.0 | ^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.0 | ^11.0",
+        "pestphp/pest": "^4.7"
+    },
+    "autoload": {
+        "psr-4": {
+            "Prometa\\Lucene\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Prometa\\Lucene\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Prometa\\Lucene\\Laravel\\LuceneServiceProvider"
+            ],
+            "aliases": {
+                "Lucene": "Prometa\\Lucene\\Laravel\\Facades\\Lucene"
+            }
+        }
+    },
+    "scripts": {
+        "test": "pest",
+        "test:coverage": "pest --coverage"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
