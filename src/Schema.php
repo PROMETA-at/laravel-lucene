@@ -107,6 +107,36 @@ final class Schema
         return $this->add(new FieldDefinition($name, $column, FieldType::Relation, $relation));
     }
 
+    /**
+     * Match a field against a developer-authored raw SQL expression (e.g.
+     * `CONCAT(name, ' ', family_name)`) instead of a single column. With
+     * `$relation` set, the expression is evaluated inside `whereHas($relation)`.
+     *
+     * The SQL is static schema config — it must never interpolate user input —
+     * and is database-dialect-specific (`CONCAT(...)` on MySQL/PostgreSQL,
+     * `a || b` on SQLite). The searched term is always a bound parameter.
+     */
+    public function expression(string $name, string $sql, ?string $relation = null): self
+    {
+        $type = $relation !== null ? FieldType::Relation : FieldType::Text;
+
+        return $this->add(new FieldDefinition($name, $sql, $type, $relation, raw: true));
+    }
+
+    /**
+     * Declare a composite field: one Lucene name that fans out to several
+     * underlying targets, matched with OR. Each member uses the same definition
+     * grammar as a single field (plain column, relation, or expression), e.g.
+     *
+     *     ->composite('email', 'text:email', 'relation:contact.emails.email')
+     */
+    public function composite(string $name, string|array ...$members): self
+    {
+        $parsed = array_map(fn (string|array $member) => self::parseDefinition($name, $member), $members);
+
+        return $this->add(FieldDefinition::composite($name, $parsed));
+    }
+
     public function add(FieldDefinition $field): self
     {
         $this->fields[$field->name] = $field;
@@ -191,7 +221,11 @@ final class Schema
     private static function parseDefinition(string $name, mixed $definition): FieldDefinition
     {
         if (is_array($definition)) {
-            return self::parseArrayDefinition($name, $definition);
+            // A sequential (list) array is a composite field — each element a
+            // member; an associative array is a single field definition.
+            return array_is_list($definition)
+                ? self::parseCompositeDefinition($name, $definition)
+                : self::parseArrayDefinition($name, $definition);
         }
 
         if (! is_string($definition)) {
@@ -200,8 +234,21 @@ final class Schema
             );
         }
 
-        // String form: "type" or "type:spec" (spec is a relation path or a column override).
+        // String form: "type" or "type:spec" (spec is a relation path, a column
+        // override, or — for `expression` — the raw SQL itself).
         [$keyword, $spec] = array_pad(explode(':', $definition, 2), 2, null);
+
+        // `expression` is a config keyword, not a FieldType case: intercept it
+        // before fromKeyword() (which would otherwise throw on it). String form
+        // is base-table only; relation expressions must use the array form.
+        if (strtolower($keyword) === 'expression') {
+            if ($spec === null || $spec === '') {
+                throw new InvalidSchemaException("Expression field \"{$name}\" must provide SQL: 'expression:<sql>'.");
+            }
+
+            return new FieldDefinition($name, $spec, FieldType::Text, raw: true);
+        }
+
         $type = FieldType::fromKeyword($keyword);
 
         if ($type === FieldType::Relation) {
@@ -214,12 +261,36 @@ final class Schema
     }
 
     /**
+     * @param  list<mixed>  $members
+     */
+    private static function parseCompositeDefinition(string $name, array $members): FieldDefinition
+    {
+        $parsed = array_map(fn (mixed $member) => self::parseDefinition($name, $member), $members);
+
+        return FieldDefinition::composite($name, $parsed);
+    }
+
+    /**
      * @param  array<string, mixed>  $definition
      */
     private static function parseArrayDefinition(string $name, array $definition): FieldDefinition
     {
         if (! isset($definition['type'])) {
             throw new InvalidSchemaException("Field \"{$name}\" is missing the required 'type' key.");
+        }
+
+        // `expression` is a config keyword, not a FieldType case: intercept it
+        // before fromKeyword(). Maps to Text+raw (base table) or Relation+raw
+        // (with a 'relation' key).
+        if (strtolower((string) $definition['type']) === 'expression') {
+            if (! isset($definition['sql'])) {
+                throw new InvalidSchemaException("Expression field \"{$name}\" must define a 'sql' key (the raw SQL expression).");
+            }
+
+            $relation = $definition['relation'] ?? null;
+            $type = $relation !== null ? FieldType::Relation : FieldType::Text;
+
+            return new FieldDefinition($name, (string) $definition['sql'], $type, $relation, raw: true);
         }
 
         $type = FieldType::fromKeyword((string) $definition['type']);

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Prometa\Lucene\Exceptions\InvalidSchemaException;
 use Prometa\Lucene\Exceptions\LuceneException;
+use Prometa\Lucene\FieldType;
 use Prometa\Lucene\Schema;
 
 it('reports an unknown field type as a catchable schema error', function () {
@@ -44,4 +45,50 @@ it('parses the documented relation form', function () {
     expect($field->isRelation())->toBeTrue()
         ->and($field->relation)->toBe('author')
         ->and($field->column)->toBe('name');
+});
+
+it('parses the string expression form, keeping internal colons', function () {
+    $schema = Schema::fromArray(['fields' => ['full_name' => "expression:coalesce(a, '::')"]]);
+    $field = $schema->field('full_name');
+    expect($field->isRaw())->toBeTrue()
+        ->and($field->type)->toBe(FieldType::Text)
+        ->and($field->column)->toBe("coalesce(a, '::')")
+        ->and($field->relation)->toBeNull();
+});
+
+it('rejects a string expression form with no SQL', function () {
+    expect(fn () => Schema::fromArray(['fields' => ['x' => 'expression:']]))
+        ->toThrow(InvalidSchemaException::class);
+});
+
+it('rejects an array expression definition missing its sql key', function () {
+    expect(fn () => Schema::fromArray(['fields' => ['x' => ['type' => 'expression', 'relation' => 'contact']]]))
+        ->toThrow(InvalidSchemaException::class);
+});
+
+it('builds a relation expression via the fluent expression() method', function () {
+    $field = Schema::make()->expression('name', 'a || b', 'contact')->field('name');
+    expect($field->isRaw())->toBeTrue()
+        ->and($field->isRelation())->toBeTrue()
+        ->and($field->relation)->toBe('contact')
+        ->and($field->column)->toBe('a || b');
+});
+
+it('builds a composite via the fluent composite() method', function () {
+    $field = Schema::make()
+        ->composite('email', 'text:email', 'relation:contact.emails.email')
+        ->field('email');
+
+    expect($field->isComposite())->toBeTrue()
+        ->and($field->members)->toHaveCount(2)
+        ->and($field->members[0]->column)->toBe('email')
+        ->and($field->members[1]->isRelation())->toBeTrue()
+        ->and($field->members[1]->relation)->toBe('contact.emails');
+});
+
+it('treats an associative array as a single field, not a composite', function () {
+    $field = Schema::fromArray(['fields' => ['author' => ['type' => 'relation', 'relation' => 'author', 'column' => 'name']]])
+        ->field('author');
+    expect($field->isComposite())->toBeFalse()
+        ->and($field->isRelation())->toBeTrue();
 });

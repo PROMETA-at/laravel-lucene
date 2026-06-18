@@ -125,6 +125,90 @@ Article::query()->whereMatch('title:foo', $schema)->get();
 
 Aliasing a field to a differently-named column: `'name' => 'text:full_name'`.
 
+### Nested relations
+
+A relation path may traverse **multiple** hops. The **last** dot-segment is always
+the column; everything before it is the (possibly nested) Eloquent relation passed
+to `whereHas`, which accepts a dotted nested relation natively:
+
+```php
+protected array $lucene = [
+    'fields' => [
+        // User → contact (belongsTo) → emails (hasMany) → column `email`
+        'contact_email' => 'relation:contact.emails.email',
+    ],
+];
+```
+
+```php
+User::query()->whereMatch('contact_email:acme')->get();   // fielded
+User::query()->whereMatch('acme')->get();                 // bare, if listed in `default`
+```
+
+So `relation:contact.emails.email` compiles to `whereHas('contact.emails', email LIKE …)`.
+
+### Expression fields
+
+Match against a developer-authored **SQL expression** instead of a single column —
+e.g. a full name spanning two columns. The user's term is still a bound parameter;
+only the static expression is raw (same trust level as naming a column). Expression
+fields are **text-matching only** (no numeric/date coercion or ranges).
+
+Array form (recommended — raw SQL doesn't fit the `type:spec` string DSL):
+
+```php
+'fields' => [
+    'full_name'    => ['type' => 'expression', 'sql' => "CONCAT(name, ' ', family_name)"],
+    // behind a relation — evaluated inside whereHas('contact'):
+    'contact_name' => ['type' => 'expression', 'relation' => 'contact', 'sql' => "CONCAT(name, ' ', family_name)"],
+],
+```
+
+String form (base table only — a relation expression must use the array form):
+
+```php
+'fields' => ['full_name' => "expression:CONCAT(name, ' ', family_name)"],
+```
+
+Or fluently:
+
+```php
+Schema::make()
+    ->expression('full_name', "CONCAT(name, ' ', family_name)")
+    ->expression('contact_name', "CONCAT(name, ' ', family_name)", 'contact');
+```
+
+> **The expression is your raw SQL**, so it is database-dialect-specific
+> (`CONCAT(...)` on MySQL/PostgreSQL, `a || b` on SQLite). It is static schema
+> config — **never interpolate user input into it.** The searched term is always
+> bound separately.
+
+### Composite fields
+
+Declare one Lucene name that fans out to **several** targets, matched with OR. A
+member can be a plain column, a (nested) relation, or an expression — anything a
+single field can be. List the members as a **sequential array**:
+
+```php
+'fields' => [
+    'email' => [                            // matches EITHER target (OR)
+        'text:email',                       //   users.email
+        'relation:contact.emails.email',    //   contact emails (nested)
+    ],
+],
+'default' => ['email'],                     // composites participate in bare-term search too
+```
+
+Or fluently:
+
+```php
+Schema::make()->composite('email', 'text:email', 'relation:contact.emails.email');
+```
+
+A term on `email` — whether `email:foo` or a bare `foo` via `default` — matches if
+**any** member matches. Composites don't nest. (An *associative* array, `['type'
+=> …]`, is a single field; only a sequential list is a composite.)
+
 ### Notes & limitations
 
 - **Relation fields need an Eloquent builder.** `whereHas` requires Eloquent's relation metadata, so a relation field on a plain `DB::table(...)` query or via `Lucene::toSql()` throws `UnsupportedFeatureException` rather than miscompiling. Use `Model::query()->whereMatch(...)`.
@@ -177,6 +261,7 @@ A model's `$lucene['operator']` overrides `default_operator` for that model.
 - **Default-deny fields.** A field is searchable only if declared in the schema; anything else throws `UnknownFieldException`. User input never becomes an arbitrary column name.
 - **Always parameterized.** Term/phrase/range/wildcard/regex literals are bound parameters, never concatenated into SQL.
 - **Explicit `ESCAPE`.** Every `LIKE` is emitted with an explicit, driver-correct `ESCAPE` clause, and user-typed `%`/`_` are neutralised before wildcard substitution — so `title:50%` matches the literal text, not everything.
+- **Expression fields are developer SQL.** The only raw-SQL surface is the static expression string you author in the schema (same trust level as a column name). It must never embed user input; the searched term is always bound separately.
 - **Guardrails.** `max_depth` and `max_clauses` bound the compiled query so a hostile string can't explode it.
 
 ## Errors

@@ -7,6 +7,7 @@ namespace Prometa\Lucene\Laravel;
 use Closure;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
+use Illuminate\Database\Query\Expression;
 use Illuminate\Support\Carbon;
 use Prometa\Lucene\Ast\BooleanQuery;
 use Prometa\Lucene\Ast\BoostNode;
@@ -199,7 +200,10 @@ final class EloquentCompiler
             throw new LuceneException("Query exceeds the maximum of {$this->options->maxClauses} clauses.");
         }
 
-        $column = $field->column;
+        // A raw field's "column" is developer-authored SQL: wrap it in an
+        // Expression so the grammar emits it untouched (the user term stays a
+        // bound parameter). A plain field stays a whitelisted identifier string.
+        $column = $field->isRaw() ? new Expression($field->column) : $field->column;
 
         match (true) {
             $leaf instanceof TermNode => $this->applyTerm($query, $column, $field, $leaf->value),
@@ -213,7 +217,7 @@ final class EloquentCompiler
         };
     }
 
-    private function applyTerm($query, string $column, FieldDefinition $field, string $value): void
+    private function applyTerm($query, string|Expression $column, FieldDefinition $field, string $value): void
     {
         match ($field->type) {
             FieldType::Text, FieldType::Relation => $this->applyLike($query, $column, LikePattern::contains($value, $this->options->escapeChar)),
@@ -221,7 +225,7 @@ final class EloquentCompiler
         };
     }
 
-    private function applyWildcard($query, string $column, string $pattern): void
+    private function applyWildcard($query, string|Expression $column, string $pattern): void
     {
         if (RawTerm::isLeadingWildcard($pattern) && $this->options->leadingWildcard === 'forbid') {
             throw new UnsupportedFeatureException('leading wildcard', 'Leading wildcards are disabled (config lucene.leading_wildcard).');
@@ -230,7 +234,7 @@ final class EloquentCompiler
         $this->applyLike($query, $column, LikePattern::fromWildcard($pattern, $this->options->escapeChar));
     }
 
-    private function applyFuzzy($query, string $column, string $value): void
+    private function applyFuzzy($query, string|Expression $column, string $value): void
     {
         match ($this->options->unsupported) {
             'throw' => throw new UnsupportedFeatureException('fuzzy'),
@@ -240,7 +244,7 @@ final class EloquentCompiler
         };
     }
 
-    private function applyRegex($query, string $column, string $pattern): void
+    private function applyRegex($query, string|Expression $column, string $pattern): void
     {
         if ($this->options->unsupported === 'throw') {
             throw new UnsupportedFeatureException('regex');
@@ -260,7 +264,7 @@ final class EloquentCompiler
         $query->whereRaw("{$wrapped} {$operator} ?", [$pattern]);
     }
 
-    private function applyRange($query, string $column, FieldDefinition $field, RangeNode $node): void
+    private function applyRange($query, string|Expression $column, FieldDefinition $field, RangeNode $node): void
     {
         $lower = $node->lower !== null ? $this->coerce($field, $node->lower) : null;
         $upper = $node->upper !== null ? $this->coerce($field, $node->upper) : null;
@@ -286,7 +290,7 @@ final class EloquentCompiler
      * Emit a `LIKE`/`ILIKE` with an explicit, driver-correct `ESCAPE` clause. The
      * pattern is bound; only the (fixed, non-user) escape char touches raw SQL.
      */
-    private function applyLike($query, string $column, string $pattern): void
+    private function applyLike($query, string|Expression $column, string $pattern): void
     {
         $wrapped = $this->base($query)->getGrammar()->wrap($column);
         $operator = ($this->options->caseInsensitive && $this->driver($query) === 'pgsql') ? 'ilike' : 'like';
@@ -340,24 +344,26 @@ final class EloquentCompiler
 
     /**
      * Resolve the field(s) a leaf targets: its explicit field, or the schema's
-     * default fields for a bare term.
+     * default fields for a bare term. Composite fields are flattened into their
+     * members so the OR fan-out in {@see compileLeaf()} sees a flat target list.
      *
      * @return list<FieldDefinition>
      */
     private function targets(Node $leaf): array
     {
         $field = $this->leafField($leaf);
+        $resolved = $field !== null ? [$this->schema->resolve($field)] : $this->schema->defaults();
 
-        if ($field !== null) {
-            return [$this->schema->resolve($field)];
+        $flat = [];
+        foreach ($resolved as $f) {
+            $f->isComposite() ? array_push($flat, ...$f->members) : ($flat[] = $f);
         }
 
-        $defaults = $this->schema->defaults();
-        if ($defaults === []) {
+        if ($flat === []) {
             throw new LuceneException('No default field configured; a bare term needs at least one default field in the schema.');
         }
 
-        return $defaults;
+        return $flat;
     }
 
     private function leafField(Node $leaf): ?string
